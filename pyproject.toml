@@ -15,6 +15,7 @@ train-1d-mnist = "onebit_gate_mlp.train:main"
 
 [dependency-groups]
 dev = [
+  "matplotlib>=3.11.0",
   "ruff>=0.8.0",
 ]
 

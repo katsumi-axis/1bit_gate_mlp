@@ -67,15 +67,27 @@ class MultiBasisBinaryLinear(nn.Module):
         return out * self.scale
 
 
-class SwiGLU(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int):
+class OneBitPostGateBlock(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int,
+        intermediate_dim: int,
+        binary_bases: int,
+    ):
         super().__init__()
-        self.up = nn.Linear(dim, hidden_dim * 2)
-        self.down = nn.Linear(hidden_dim, dim)
+        if binary_bases == 1:
+            self.up_proj = BinaryLinear(input_dim, intermediate_dim)
+            self.down_proj = BinaryLinear(intermediate_dim, hidden_dim)
+        else:
+            self.up_proj = MultiBasisBinaryLinear(input_dim, intermediate_dim, binary_bases)
+            self.down_proj = MultiBasisBinaryLinear(intermediate_dim, hidden_dim, binary_bases)
+        self.gate_proj = nn.Linear(hidden_dim, hidden_dim)
 
     def __call__(self, x: mx.array) -> mx.array:
-        gate, value = mx.split(self.up(x), 2, axis=-1)
-        return self.down(nn.silu(gate) * value)
+        down = self.down_proj(self.up_proj(x))
+        gate = self.gate_proj(down)
+        return down * nn.silu(gate)
 
 
 def _make_thresholds(bases: int) -> mx.array:
@@ -84,13 +96,13 @@ def _make_thresholds(bases: int) -> mx.array:
     return mx.linspace(-1.0, 1.0, bases)
 
 
-class OneBitSwiGLUMLP(nn.Module):
+class OneBitGateMLP(nn.Module):
     def __init__(
         self,
         input_dim: int = 784,
         hidden_dim: int = 256,
         depth: int = 3,
-        swiglu_ratio: float = 2.0,
+        gate_ratio: float = 2.0,
         binary_bases: int = 1,
         num_classes: int = 10,
     ):
@@ -98,30 +110,31 @@ class OneBitSwiGLUMLP(nn.Module):
         if depth < 1:
             raise ValueError("depth must be >= 1")
 
-        self.binary_layers = []
-        self.swiglus = []
+        self.layers = []
         dim = input_dim
-        swiglu_hidden = int(hidden_dim * swiglu_ratio)
+        gate_hidden = int(hidden_dim * gate_ratio)
         for _ in range(depth):
-            if binary_bases == 1:
-                self.binary_layers.append(BinaryLinear(dim, hidden_dim))
-            else:
-                self.binary_layers.append(MultiBasisBinaryLinear(dim, hidden_dim, binary_bases))
-            self.swiglus.append(SwiGLU(hidden_dim, swiglu_hidden))
+            self.layers.append(
+                OneBitPostGateBlock(
+                    input_dim=dim,
+                    hidden_dim=hidden_dim,
+                    intermediate_dim=gate_hidden,
+                    binary_bases=binary_bases,
+                )
+            )
             dim = hidden_dim
         self.norm = nn.LayerNorm(hidden_dim)
         self.head = nn.Linear(hidden_dim, num_classes)
 
     @staticmethod
     def is_binary_parameter(path: str) -> bool:
-        return path.startswith("binary_layers.") and (
-            path.endswith(".weight") or ".weights." in path
-        )
+        return path.startswith("layers.") and (
+            ".up_proj." in path or ".down_proj." in path
+        ) and (path.endswith(".weight") or ".weights." in path)
 
     def __call__(self, x: mx.array) -> mx.array:
-        for binary, swiglu in zip(self.binary_layers, self.swiglus, strict=True):
-            x = binary(x)
-            x = x + swiglu(x)
+        for layer in self.layers:
+            x = layer(x)
         return self.head(self.norm(x))
 
 
@@ -134,7 +147,7 @@ class AttentionOneBitMLP(nn.Module):
         attention_depth: int = 2,
         mlp_depth: int = 3,
         num_heads: int = 4,
-        swiglu_ratio: float = 2.0,
+        gate_ratio: float = 2.0,
         binary_bases: int = 4,
         num_classes: int = 10,
     ):
@@ -148,18 +161,18 @@ class AttentionOneBitMLP(nn.Module):
         self.pos_embed = mx.zeros((1, self.num_patches, hidden_dim))
         self.blocks = [AttentionBlock(hidden_dim, num_heads) for _ in range(attention_depth)]
         self.norm = nn.LayerNorm(hidden_dim)
-        self.onebit_mlp = OneBitSwiGLUMLP(
+        self.onebit_mlp = OneBitGateMLP(
             input_dim=hidden_dim,
             hidden_dim=hidden_dim,
             depth=mlp_depth,
-            swiglu_ratio=swiglu_ratio,
+            gate_ratio=gate_ratio,
             binary_bases=binary_bases,
             num_classes=num_classes,
         )
 
     @staticmethod
     def is_binary_parameter(path: str) -> bool:
-        return path.startswith("onebit_mlp.") and OneBitSwiGLUMLP.is_binary_parameter(
+        return path.startswith("onebit_mlp.") and OneBitGateMLP.is_binary_parameter(
             path.removeprefix("onebit_mlp.")
         )
 
@@ -249,17 +262,17 @@ def build_model(
     depth: int,
     num_heads: int,
     patch_size: int,
-    swiglu_ratio: float = 2.0,
+    gate_ratio: float = 2.0,
     binary_bases: int = 1,
 ) -> nn.Module:
     if name == "mlp":
         return MLPOnly(input_dim=input_dim, hidden_dim=hidden_dim, depth=depth)
-    if name == "onebit_swiglu_mlp":
-        return OneBitSwiGLUMLP(
+    if name == "onebit_gate_mlp":
+        return OneBitGateMLP(
             input_dim=input_dim,
             hidden_dim=hidden_dim,
             depth=depth,
-            swiglu_ratio=swiglu_ratio,
+            gate_ratio=gate_ratio,
             binary_bases=binary_bases,
         )
     if name == "attention_onebit_mlp":
@@ -270,7 +283,7 @@ def build_model(
             mlp_depth=depth,
             num_heads=num_heads,
             patch_size=patch_size,
-            swiglu_ratio=swiglu_ratio,
+            gate_ratio=gate_ratio,
             binary_bases=binary_bases,
         )
     if name == "attention_mlp":

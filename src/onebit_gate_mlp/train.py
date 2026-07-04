@@ -55,7 +55,7 @@ def train(args: argparse.Namespace) -> None:
         depth=args.depth,
         num_heads=args.num_heads,
         patch_size=args.patch_size,
-        swiglu_ratio=args.swiglu_ratio,
+        gate_ratio=args.gate_ratio,
         binary_bases=args.binary_bases,
     )
     optimizer = optim.AdamW(learning_rate=args.lr, weight_decay=args.weight_decay)
@@ -147,7 +147,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train MLX models on 1D MNIST.")
     parser.add_argument(
         "--model",
-        choices=["mlp", "attention_mlp", "onebit_swiglu_mlp", "attention_onebit_mlp"],
+        choices=[
+            "mlp",
+            "attention_mlp",
+            "onebit_gate_mlp",
+            "attention_onebit_mlp",
+        ],
         default="mlp",
     )
     parser.add_argument("--data-dir", default="data/mnist1d")
@@ -159,7 +164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth", type=int, default=3)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--patch-size", type=int, default=5)
-    parser.add_argument("--swiglu-ratio", type=float, default=2.0)
+    parser.add_argument("--gate-ratio", type=float, default=2.0)
     parser.add_argument("--binary-bases", type=int, default=1)
     parser.add_argument("--bop-threshold", type=float, default=1e-4)
     parser.add_argument("--bop-gamma", type=float, default=1e-4)
